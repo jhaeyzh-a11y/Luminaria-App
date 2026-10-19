@@ -9,6 +9,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.media.AudioManager;
+import android.speech.tts.TextToSpeech;
 import android.util.Base64;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
@@ -23,6 +25,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.Locale;
 
 public class MainActivity extends Activity {
 
@@ -46,10 +49,36 @@ public class MainActivity extends Activity {
     private WebView web;
     private ValueCallback<Uri[]> filePathCallback;
 
+    private TextToSpeech tts;
+    private boolean ttsReady = false;
+    private String pendingText = null;
+    private String pendingLang = null;
+
     @SuppressLint({"SetJavaScriptEnabled", "JavascriptInterface"})
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
+
+        tts = new TextToSpeech(getApplicationContext(), new TextToSpeech.OnInitListener() {
+            @Override
+            public void onInit(int status) {
+                String t = null;
+                String l = null;
+                synchronized (MainActivity.this) {
+                    ttsReady = (status == TextToSpeech.SUCCESS);
+                    if (ttsReady && pendingText != null) {
+                        t = pendingText;
+                        l = pendingLang;
+                        pendingText = null;
+                    }
+                }
+                if (t != null) {
+                    speakNow(t, l);
+                }
+            }
+        });
+
         web = new WebView(this);
         setContentView(web);
 
@@ -60,6 +89,7 @@ public class MainActivity extends Activity {
         s.setMediaPlaybackRequiresUserGesture(false);
 
         web.addJavascriptInterface(new Bridge(), "AndroidBridge");
+        web.addJavascriptInterface(new TtsBridge(), "LuminariaTTS");
 
         web.setWebViewClient(new WebViewClient() {
             @Override
@@ -138,12 +168,45 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         web.onPause();
+        if (tts != null) {
+            tts.stop();
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (tts != null) {
+            tts.stop();
+            tts.shutdown();
+        }
+        super.onDestroy();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         web.onResume();
+    }
+
+    private static boolean langBad(int r) {
+        return r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED;
+    }
+
+    private void speakNow(String text, String lang) {
+        if (tts == null) {
+            return;
+        }
+        boolean fil = "fil".equals(lang);
+        int r = tts.setLanguage(fil ? new Locale("fil", "PH") : new Locale("en", "PH"));
+        if (langBad(r) && fil) {
+            r = tts.setLanguage(new Locale("tl", "PH"));
+        }
+        if (langBad(r)) {
+            tts.setLanguage(Locale.US);
+        }
+        tts.setSpeechRate(0.9f);
+        tts.setPitch(1.0f);
+        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "luminaria");
     }
 
     private void toast(final String msg) {
@@ -188,6 +251,34 @@ public class MainActivity extends Activity {
                 out.close();
             }
             return "Android > data > com.luminaria.app > files > Download";
+        }
+    }
+
+    /* The app looks for window.LuminariaTTS and uses it to read aloud. */
+    private class TtsBridge {
+        @JavascriptInterface
+        public void speak(String text, String lang) {
+            if (text == null || text.trim().isEmpty()) {
+                return;
+            }
+            boolean ready;
+            synchronized (MainActivity.this) {
+                ready = ttsReady;
+                if (!ready) {
+                    pendingText = text;
+                    pendingLang = lang;
+                }
+            }
+            if (ready) {
+                speakNow(text, lang);
+            }
+        }
+
+        @JavascriptInterface
+        public void stop() {
+            if (tts != null) {
+                tts.stop();
+            }
         }
     }
 
